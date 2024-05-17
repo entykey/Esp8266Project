@@ -7,7 +7,7 @@
 // Nguyen Huu Anh Tuan 16-05-2024 nighty-20240308
 // 1. builtin led, websocket + stepper motor assigned (AccelStepper imported) => still works
 // 2. modifed websocket even handler => still works
-// 3. added html page => fucking worked now !!!
+// 3. added html page => worked now !!!
 // 4. added lcd and first print after initialization => worked
 // 5. buzzer worked
 // 6. assign relay to SD2 (GPIO9) => boot looping
