@@ -3,16 +3,23 @@
 // Port (OSX): /dev/cu.usbserial-0001 Serial Port (USB)
 // TIPS: try to unflug and flug it back to detect it.
 
+//*
 // Nguyen Huu Anh Tuan 16-05-2024 nighty-20240308
 // 1. builtin led, websocket + stepper motor assigned (AccelStepper imported) => still works
 // 2. modifed websocket even handler => still works
 // 3. added html page => fucking worked now !!!
+// 4. added lcd and first print after initialization => worked
+// 5. buzzer worked
+// 6. assign relay to SD2 (GPIO9) => boot looping
+// 7. found out, re-assigned relay to SD3 (GPIO10) => worked
 // STATUS: all features working fine. Not added crystal i2c yet
 #include <Arduino.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
 #include <WebSocketsServer.h>
 #include <ESP8266mDNS.h>
+#include <Wire.h> // to make crystal_i2c works
+#include <LiquidCrystal_I2C.h>
 #include <AccelStepper.h> // Include the AccelStepper library
 
 ESP8266WebServer server(80);
@@ -32,6 +39,16 @@ IPAddress secondaryDNS(8, 8, 4, 4);
 // built-in led
 int ledPin = 2;
 bool ledState = HIGH;
+
+// relay 5v (assigned to SD2 (gpio09) cause boot looping)
+#define RELAY_PIN 10 // SD3 (GPIO10)
+bool relayState = LOW;
+
+
+// lcd i2c
+// LiquidCrystal_I2C lcd(0x3F,16,2);    // works for Arduino 
+// in ESP8266, if lcd is not print then use this 0x27..  
+LiquidCrystal_I2C lcd(0x27, 16, 2); // SDA to D4, SCL to D3
 
 // stepper motor
 #define MotorInterfaceType 8
@@ -53,6 +70,9 @@ unsigned long lastWaterCheck = 0;
 const unsigned long waterCheckInterval = 1000;
 bool isRaining = false;
 
+// buzzer
+#define BUZZER_PIN D8
+
 // also rotate stepper once detected rain
 void broadcastWaterSensorValue() {
   digitalWrite(POWER_PIN, HIGH);  // turn the rain sensor's power ON
@@ -62,13 +82,22 @@ void broadcastWaterSensorValue() {
 
   Serial.println(rainValue);  // print out the analog value
 
-  // Check if the rain value exceeds the threshold of 60
-  if (rainValue > 60 && !isRaining) {
+  // Display the rain value on the LCD
+  lcd.clear();
+  lcd.setCursor(0, 0);
+  lcd.print("Rain Value: ");
+  lcd.setCursor(0, 1);
+  lcd.print(rainValue);
+
+  // Check if the rain value exceeds the threshold of 64
+  if (rainValue > 64 && !isRaining) {
     isRaining = true;
     webSocket.broadcastTXT("isRaining=true");
+    beep(2);
     closeCurtain();
-  } else if (rainValue <= 60 && isRaining) {
+  } else if (rainValue <= 64 && isRaining) {
     isRaining = false;
+    beep(2);
     webSocket.broadcastTXT("isRaining=false");
     openCurtain();
   }
@@ -85,27 +114,32 @@ void closeCurtain() {
                     webSocket.broadcastTXT(responseMsg);
                     strcpy(responseMsg, currentPosition == 3 ? "CURTAIN_OPEN" : "CURTAIN_CLOSED");
                     webSocket.broadcastTXT(responseMsg);
+                    flashLED(2);
                 }
   else {
     Serial.println("Motor is busy rotating, try again later");
   }
 }
 
-void openCurtain() {
-  char responseMsg[15];
-  if (!motorRotating) {
-                    motorRotating = true;
-                    strcpy(responseMsg, "MOTOR_ON");
-                    webSocket.broadcastTXT(responseMsg);
-                    rotateStepper(3); // Open the curtain
-                    strcpy(responseMsg, "MOTOR_OFF");
-                    webSocket.broadcastTXT(responseMsg);
-                    strcpy(responseMsg, currentPosition == 3 ? "CURTAIN_OPEN" : "CURTAIN_CLOSED");
-                    webSocket.broadcastTXT(responseMsg);
-                }
-  else {
-    Serial.println("Motor is busy rotating, try again later");
-  }
+void openCurtain()
+{
+    char responseMsg[15];
+    if (!motorRotating)
+    {
+        motorRotating = true;
+        strcpy(responseMsg, "MOTOR_ON");
+        webSocket.broadcastTXT(responseMsg);
+        rotateStepper(3); // Open the curtain
+        strcpy(responseMsg, "MOTOR_OFF");
+        webSocket.broadcastTXT(responseMsg);
+        strcpy(responseMsg, currentPosition == 3 ? "CURTAIN_OPEN" : "CURTAIN_CLOSED");
+        webSocket.broadcastTXT(responseMsg);
+        flashLED(2);
+    }
+    else
+    {
+        Serial.println("Motor is busy rotating, try again later");
+    }
 }
 
 void rotateStepper(int rounds) {
@@ -113,7 +147,7 @@ void rotateStepper(int rounds) {
     if ((rounds > 0 && currentPosition == 3) || (rounds < 0 && currentPosition == 0)) {
         Serial.printf("[rotateStepper] already in position.\n");
         motorRotating = false;
-        strcpy(responseMsg, rounds > 0 ? "ALREADY_OPEN" : "ALREADY_CLOSED");
+        // strcpy(responseMsg, rounds > 0 ? "ALREADY_OPEN" : "ALREADY_CLOSED");
         webSocket.broadcastTXT(rounds > 0 ? "ALREADY_OPEN" : "ALREADY_CLOSED");
         return;
     }
@@ -144,12 +178,14 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
     switch(type) {
         case WStype_DISCONNECTED:
             Serial.printf("[%u] Disconnected!\n", num);
-            flashLED(2);
+            // flashLED(2);
+            beep(2);
             break;
         case WStype_CONNECTED: {
             IPAddress ip = webSocket.remoteIP(num);
             Serial.printf("[%u] Connected from %d.%d.%d.%d url: %s\n", num, ip[0], ip[1], ip[2], ip[3], payload);
-            flashLED(2);
+            // flashLED(2);
+            beep(2);
             strcpy(responseMsg, ledState ? "ON" : "OFF");
             webSocket.sendTXT(num, responseMsg);
             strcpy(responseMsg, motorRotating ? "MOTOR_ON" : "MOTOR_OFF");
@@ -162,16 +198,38 @@ void webSocketEvent(uint8_t num, WStype_t type, uint8_t * payload, size_t length
             Serial.printf("[%u] get Text: %s\n", num, payload);
             if (strcmp((const char*)payload, "toggle") == 0) {
                 ledState = !ledState;
+                beep(2);
                 digitalWrite(ledPin, ledState ? LOW : HIGH);
                 strcpy(responseMsg, ledState ? "ON" : "OFF");
                 webSocket.broadcastTXT(responseMsg);
             } else if (strcmp((const char*)payload, "open") == 0) {
+                beep(2);
                 openCurtain();
             } else if (strcmp((const char*)payload, "close") == 0) {
+                beep(2);
                 closeCurtain();
+            } else if (strcmp((const char*)payload, "relaytoggle") == 0) {
+                beep(2);
+                Serial.println("toggling relay");
+                relayState = !relayState; // Update the relay state
+                digitalWrite(RELAY_PIN, relayState ? HIGH : LOW);
+                strcpy(responseMsg, relayState ? "RELAY_ON" : "RELAY_OFF");
+                webSocket.broadcastTXT(responseMsg);
             }
             break;
     }
+}
+
+void beep(int times) {
+  for (int i = 0; i < times; ++i) {
+    //   tone(BUZZER_PIN,13500);
+    //   delay(80);
+    // tone(BUZZER_PIN,13500);
+    digitalWrite(BUZZER_PIN,HIGH);
+    delay(80);
+    digitalWrite(BUZZER_PIN,LOW);
+    delay(80);
+  }
 }
 
 void handleRoot() {
@@ -217,7 +275,9 @@ void handleRoot() {
     <h1>ESP8266 Web Server</h1>
     <div id='status'>WebSocket Status: Not Connected</div>
     <p>Built-in LED State: <span id="ledState">Unknown</span></p>
+    <p>Relay State: <span id="relayState">Unknown</span></p>
     <button id="toggleButton" onclick="toggleLED()">Toggle LED</button>
+    <button id="relayToggleButton" onclick="toggleRelay()">Toggle Relay</button>
     <button id="openButton" onclick="openCurtain()">Open Curtain</button>
     <button id="closeButton" onclick="closeCurtain()">Close Curtain</button>
     <div id='motorStatus'>Motor Status: Idle</div>
@@ -231,10 +291,12 @@ void handleRoot() {
         };
         ws.onmessage = function(event) {
             var stateSpan = document.getElementById('ledState');
+            var relayStateSpan = document.getElementById('relayState');
             var motorStatusDiv = document.getElementById('motorStatus');
             var curtainStatusDiv = document.getElementById('curtainStatus');
             var rainStatusDiv = document.getElementById('rainStatusDiv');
             var toggleButton = document.getElementById('toggleButton');
+            var toggleRelayButton = document.getElementById('relayToggleButton');
             var openButton = document.getElementById('openButton');
             var closeButton = document.getElementById('closeButton');
             if (event.data === 'ON') {
@@ -242,6 +304,12 @@ void handleRoot() {
                 toggleButton.style.backgroundColor = 'green';
             } else if (event.data === 'OFF') {
                 stateSpan.textContent = 'OFF';
+                toggleButton.style.backgroundColor = 'red';
+            } else if (event.data === 'RELAY_ON') {
+                relayStateSpan.textContent = 'ON';
+                toggleButton.style.backgroundColor = 'green';
+            } else if (event.data === 'RELAY_OFF') {
+                relayStateSpan.textContent = 'OFF';
                 toggleButton.style.backgroundColor = 'red';
             } else if (event.data === 'MOTOR_ON') {
                 motorStatusDiv.textContent = 'Motor Status: Rotating';
@@ -251,10 +319,6 @@ void handleRoot() {
                 motorStatusDiv.textContent = 'Motor Status: Idle';
                 openButton.disabled = false;
                 closeButton.disabled = false;
-            } else if (event.data === 'ALREADY_OPEN') {
-                motorStatusDiv.textContent = 'Curtain is already open';
-            } else if (event.data === 'ALREADY_CLOSED') {
-                motorStatusDiv.textContent = 'Curtain is already closed';
             } else if (event.data === 'isRaining=true') {
                 rainStatusDiv.textContent = 'Rain Status: Raining';
                 rainStatusDiv.classList.remove('status-green');
@@ -272,10 +336,21 @@ void handleRoot() {
                 curtainStatusDiv.textContent = 'Curtain Status: Closed';
                 curtainStatusDiv.classList.remove('status-green');
                 curtainStatusDiv.classList.add('status-red');
+            } else if (event.data === 'ALREADY_OPEN') {
+                curtainStatusDiv.textContent = 'Curtain Status: Already Opened';
+                curtainStatusDiv.classList.remove('status-red');
+                curtainStatusDiv.classList.add('status-green');
+            } else if (event.data === 'ALREADY_OPEN') {
+                curtainStatusDiv.textContent = 'Curtain Status: Already Closed';
+                curtainStatusDiv.classList.remove('status-green');
+                curtainStatusDiv.classList.add('status-red');
             }
         };
         function toggleLED() {
             ws.send('toggle');
+        }
+        function toggleRelay() {
+            ws.send('relaytoggle');
         }
         function openCurtain() {
             ws.send('open');
@@ -291,9 +366,20 @@ void handleRoot() {
 
 void setup() {
   Serial.begin(9600);
+  pinMode(RELAY_PIN, OUTPUT);
   pinMode(POWER_PIN, OUTPUT);
 
+  pinMode(BUZZER_PIN, OUTPUT);
+  beep(1);
+
+
   pinMode(ledPin, OUTPUT);
+  Wire.begin(2,0);
+
+  // Initialize the LCD
+  lcd.init();
+  lcd.backlight();
+  lcd.print("Setting up"); // (without this, later lines won't print anything !!!)
 
   stepper.setMaxSpeed(1200);
   stepper.setAcceleration(200);
@@ -321,6 +407,7 @@ void setup() {
   Serial.println(WiFi.localIP());
   Serial.print("ESP Board MAC Address:  ");
   Serial.println(WiFi.macAddress());
+  
 
   server.on("/", HTTP_GET, handleRoot);
   server.begin();
@@ -329,6 +416,13 @@ void setup() {
   MDNS.begin("esp8266");
   MDNS.addService("http", "tcp", 80);
   MDNS.addService("ws", "tcp", 81);
+
+  // the below lines not gonna get executed !!!
+  // Print a message to the LCD.
+  lcd.setCursor(0, 0);
+  lcd.print("ESP8266 Web");
+  lcd.setCursor(0, 1);
+  lcd.print("Server Ready!");
 }
 
 void loop() {
@@ -340,4 +434,3 @@ void loop() {
     broadcastWaterSensorValue();
   }
 }
-
